@@ -1,0 +1,99 @@
+# =========================
+# Build output
+# =========================
+build/
+dist/
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# =========================
+# Dependency & cache
+# =========================
+vcpkg_installed/
+__pycache__/
+*.pyc
+
+# =========================
+# Archives (test data etc.)
+# =========================
+*.zip
+*.rar
+*.7z
+*.tar.gz
+
+# =========================
+# Logs & debug files
+# =========================
+*.log
+build_log.txt
+build_output.txt
+sash_debug.txt
+viewer_debug.log
+sha.txt
+
+# =========================
+# Backup files
+# =========================
+*.bak
+
+# =========================
+# IDE / Editor
+# =========================
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+.idea/
+
+# =========================
+# Config (contains local paths)
+# =========================
+osgb2tiles_config.json
+config.json
+
+# =========================
+# Binary assets (not source)
+# =========================
+osgb2tiles_gui.exe
+osgb2tiles.exe
+osgb_viewer.exe
+
+# =========================
+# Runtime generated
+# =========================
+viewer.html
+
+# =========================
+# Vendored libraries (large)
+# =========================
+cesium/
+
+# =========================
+# Agent / IDE
+# =========================
+.gemini/
+.agents/
+
+# =========================
+# Temp / test
+# =========================
+test_*.obj
+*.tmp
+
+# =========================
+# OS generated
+# =========================
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# =========================
+# InnoSetup output
+# =========================
+Output/

@@ -1,0 +1,27 @@
+{
+  "name": "osgb2tiles",
+  "version": "1.0.0",
+  "description": "OSGB to 3D Tiles converter",
+  "dependencies": [
+    {
+      "name": "osg",
+      "features": [
+        "plugins"
+      ]
+    },
+    {
+      "name": "gdal",
+      "features": [
+        "tools"
+      ]
+    },
+    "tinygltf",
+    "nlohmann-json",
+    "meshoptimizer",
+    "draco",
+    "stb",
+    "cxxopts",
+    "libwebp",
+    "ktx"
+  ]
+}
