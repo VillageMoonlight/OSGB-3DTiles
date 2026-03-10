@@ -247,6 +247,7 @@ class App(tk.Tk):
         self.v_draco=tk.BooleanVar(value=False)
         self.v_draco_bits=tk.StringVar(value="14")
         self.v_geo_err=tk.DoubleVar(value=0.5)
+        self.v_merge_root=tk.BooleanVar(value=False)
         self.v_cfg=tk.StringVar(value=str(Path.cwd()/CONFIG_FILE))
         # 七参数纠正后锁定的坐标（None表示未锁定）
         self._corr_lon=None; self._corr_lat=None; self._corr_alt=None
@@ -370,6 +371,12 @@ class App(tk.Tk):
         self._gell=tk.Label(r6,text="0.50",fg=TEA,bg=BG2,font=("Consolas",9),width=4); self._gell.pack(side="left")
         sl2.configure(command=lambda v:self._gell.configure(text=f"{float(v):.2f}"))
         L(r6," (越大加载越激进)",fg=FGM).pack(side="left")
+        # 行7：根节点合并
+        SEC(lp,"根节点合并","🔗").pack(fill="x",pady=(8,2))
+        r7f=tk.Frame(lp,bg=BG2,padx=10,pady=8); r7f.pack(fill="x")
+        r7=tk.Frame(r7f,bg=BG2); r7.pack(fill="x")
+        C(r7,"启用真正的根节点合并（生成简化几何体，提升大面积远景加载效率）",self.v_merge_root).pack(side="left")
+        L(r7f,"合并所有 Block 的根节点几何体，生成多层级简化模型（top/ 目录），远景只需加载一个粗模即可渲染全场景",fg=FGM,sz=8).pack(anchor="w",pady=(4,0))
 
         # § 配置文件
         SEC(lp,"配置文件","💾").pack(fill="x",pady=(8,2))
@@ -604,7 +611,8 @@ class App(tk.Tk):
              "compressGeometry":self.v_draco.get(),
              "dracoQuantBits":int(self.v_draco_bits.get() or 14),
              "geometricErrorScale":round(self.v_geo_err.get(),2),
-             "mergeLevel":-1}  # -1=自动（由CLI根据瓦片数量智能计算）
+             "mergeLevel":-1,  # -1=自动（由CLI根据瓦片数量智能计算）
+             "mergeRoot":self.v_merge_root.get()}
         if self.v_7p.get():
             cfg["transform7p"]={"enabled":True,
                 "dx":float(self.v_dx.get() or 0),"dy":float(self.v_dy.get() or 0),"dz":float(self.v_dz.get() or 0),
@@ -669,6 +677,7 @@ class App(tk.Tk):
             self.v_draco.set(c.get("compressGeometry",False))
             self.v_draco_bits.set(str(c.get("dracoQuantBits",14)))
             self.v_geo_err.set(c.get("geometricErrorScale",0.5))
+            self.v_merge_root.set(c.get("mergeRoot",False))
             self._gell.configure(text=f"{self.v_geo_err.get():.2f}")
             self._upd_tex()  # refresh KTX2 sub-panel
             if "transform7p" in c:
@@ -711,8 +720,8 @@ class App(tk.Tk):
                         "--ktx2-quality", str(cfg.get("ktx2Quality",2))])
         if cfg.get("geometricErrorScale",0.5) != 0.5:
             cmd.extend(["--geo-error",str(cfg.get("geometricErrorScale",0.5))])
-        # --merge-level: -1=自动（让CLI自行计算），0=强制不合并，N=强制N层
         cmd.extend(["--merge-level", str(cfg.get("mergeLevel", -1))])
+        if cfg.get("mergeRoot"): cmd.append("--merge-root")
         cmd.append("--verbose")  # 始终开启详细日志（调试阶段）
         self._log_msg(f"\n{'═'*46}\n开始转换\n命令: {' '.join(cmd)}\n{'═'*46}\n","hd")
         self._set_stat("⏳ 转换中…"); self._prog.configure(mode="indeterminate"); self._prog.start(12)

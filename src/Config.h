@@ -44,6 +44,9 @@ struct ConvertConfig {
   /// 根节点合并层级：-1=自动计算（推荐），0=不合并，N=强制N层
   /// 自动模式：以目标≤100个根节点为准，ceil(log4(totalBlocks/100))
   int mergeLevel = -1;
+  /// 真正的根节点合并（生成简化几何体）：默认关闭
+  /// 启用后在转换完成后执行跨 Block 几何合并+简化，生成 top/ 目录
+  bool mergeRoot = false;
   bool simplifyMesh = false;   ///< 启用网格简化
   float simplifyRatio = 0.5f;  ///< 简化目标比例 [0.1 ~ 1.0]，越小三角形越少
   float simplifyError = 0.01f; ///< 简化最大允许误差（归一化，0~1）

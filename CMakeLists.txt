@@ -63,8 +63,6 @@ message(STATUS "WebP found: ${WebP_VERSION}")
 
 # tinygltf（header-only，vcpkg 提供 find_path 方式）
 find_path(TINYGLTF_INCLUDE_DIR tiny_gltf.h
-    HINTS ${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/x64-windows/include
-    PATH_SUFFIXES ""
     REQUIRED
 )
 message(STATUS "tinygltf include dir: ${TINYGLTF_INCLUDE_DIR}")
@@ -85,6 +83,7 @@ set(SOURCES
     src/TextureProcessor.cpp
     src/GlbWriter.cpp
     src/TilesetBuilder.cpp
+    src/TopLevelMerger.cpp
     src/ThreadPool.cpp
     src/Logger.cpp
 )
@@ -98,6 +97,7 @@ set(HEADERS
     src/TextureProcessor.h
     src/GlbWriter.h
     src/TilesetBuilder.h
+    src/TopLevelMerger.h
     src/ThreadPool.h
     src/Logger.h
     src/MathUtils.h
@@ -157,8 +157,9 @@ install(TARGETS osgb2tiles RUNTIME DESTINATION bin)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/config.json DESTINATION bin)
 
 # ============================================================
-# osgb_viewer — DasViewer 风格 OSGB 三维浏览器
+# osgb_viewer — DasViewer 风格 OSGB 三维浏览器（仅 Windows）
 # ============================================================
+if(WIN32)
 add_executable(osgb_viewer src/osgb_viewer.cpp)
 
 target_include_directories(osgb_viewer PRIVATE
@@ -192,6 +193,7 @@ if(MSVC)
 endif()
 
 install(TARGETS osgb_viewer RUNTIME DESTINATION bin)
+endif() # WIN32
 
 
 # ============================================================

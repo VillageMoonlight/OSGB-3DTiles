@@ -20,6 +20,7 @@
 #include "TextureProcessor.h"
 #include "ThreadPool.h"
 #include "TilesetBuilder.h"
+#include "TopLevelMerger.h"
 #include "WinUtils.h" // toShortPath()：解决 osgDB 不支持中文路径的问题
 
 #include <cxxopts.hpp>
@@ -81,6 +82,7 @@ static ConvertConfig loadJsonConfig(const std::string &path) {
   get(cfg.simplifyRatio, "simplifyRatio");
   get(cfg.simplifyError, "simplifyError");
   get(cfg.mergeLevel, "mergeLevel");
+  get(cfg.mergeRoot, "mergeRoot");
   // ── 纹理 ───────────────────────────────────────
   get(cfg.compressTexture, "compressTexture");
   get(cfg.textureFormat, "textureFormat");
@@ -799,6 +801,8 @@ int main(int argc, char *argv[]) {
       cxxopts::value<double>()->default_value("0.5"))(
       "merge-level", "根节点合并层级: -1=自动, 0=不合并, N=强制N层",
       cxxopts::value<int>()->default_value("-1"))(
+      "merge-root", "真正的根节点合并（生成简化几何体，提升远景加载效率）",
+      cxxopts::value<bool>()->default_value("false"))(
       "format", "输出格式: b3dm / glb",
       cxxopts::value<std::string>()->default_value("b3dm"))(
       "threads", "并行线程数（0=自动）",
@@ -913,6 +917,8 @@ int main(int argc, char *argv[]) {
     cfg.geometricErrorScale = result["geo-error"].as<double>();
   if (result.count("merge-level"))
     cfg.mergeLevel = result["merge-level"].as<int>();
+  if (result.count("merge-root"))
+    cfg.mergeRoot = result["merge-root"].as<bool>();
   if (result.count("format"))
     cfg.tileFormat = result["format"].as<std::string>();
   if (result.count("verbose") || result.count("v"))
@@ -1116,6 +1122,34 @@ int main(int argc, char *argv[]) {
   if (gofs) {
     gofs << globalTs.dump(2);
     LOG_INFO("Wrote global tileset.json -> " + globalTilesetPath);
+  }
+
+  // ── 真正的根节点合并（可选） ───────────────────────────────────
+  if (cfg.mergeRoot && okBlocks.size() > 1) {
+    LOG_INFO("=== 执行真正的根节点合并 ===");
+    std::vector<MergeBlockInfo> mergeInfos;
+    std::string ext = (cfg.tileFormat == "b3dm") ? ".b3dm" : ".glb";
+    for (const auto &br : blockResults) {
+      if (!br.ok)
+        continue;
+      MergeBlockInfo mi;
+      mi.blockName = br.blockName;
+      mi.blockTilesetRelPath = br.blockTilesetRelPath;
+      mi.bbox = br.bbox;
+      // 计算 Block 根节点的 geometricError
+      double d = bboxDiag(br.bbox);
+      mi.geometricError = (d > 0.0) ? d * cfg.geometricErrorScale * 2.0 : 6.0;
+      // 找到 Block 根瓦片文件路径
+      std::string blockDirName =
+          fs::path(br.blockTilesetRelPath).parent_path().filename().string();
+      mi.rootTilePath =
+          cfg.outputPath + "/Data/" + blockDirName + "/" + blockDirName + ext;
+      mergeInfos.push_back(std::move(mi));
+    }
+    TopLevelMerger merger;
+    if (!merger.merge(mergeInfos, cfg, cfg.outputPath)) {
+      LOG_WARN("根节点合并失败，但基础转换数据完好");
+    }
   }
 
   // ── 完成报告 ─────────────────────────────────────────────────
