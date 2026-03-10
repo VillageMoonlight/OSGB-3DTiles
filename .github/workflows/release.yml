@@ -1,0 +1,152 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            triplet: x64-windows
+            artifact: osgb2tiles-windows-x64
+            ext: .zip
+          - os: ubuntu-22.04
+            triplet: x64-linux
+            artifact: osgb2tiles-linux-x64
+            ext: .tar.gz
+          - os: macos-14
+            triplet: arm64-osx
+            artifact: osgb2tiles-macos-arm64
+            ext: .tar.gz
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.os }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # vcpkg 二进制缓存加速（GitHub Actions Cache）
+      - name: Export GitHub Actions cache variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '36fb23307e10cc6ffcec566c46c4bb3f567c82c6'
+
+      # Linux 系统依赖
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxt-dev libxmu-dev libxext-dev \
+            pkg-config nasm autoconf automake libtool
+
+      # macOS 系统依赖
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install nasm autoconf automake libtool pkg-config
+
+      - name: CMake Configure
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+        shell: bash
+
+      - name: CMake Build
+        run: cmake --build build --config Release --parallel
+        shell: bash
+
+      - name: CMake Install
+        run: cmake --install build --prefix install --config Release
+        shell: bash
+
+      # 打包
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # 复制 DLL 和运行时依赖
+          $binDir = "install/bin"
+          $vcpkgBin = "build/vcpkg_installed/${{ matrix.triplet }}/bin"
+          if (Test-Path $vcpkgBin) {
+            Copy-Item "$vcpkgBin/*.dll" $binDir -Force -ErrorAction SilentlyContinue
+          }
+          # 复制 osgPlugins 目录
+          Get-ChildItem "build/vcpkg_installed/${{ matrix.triplet }}/tools/osg" -Directory -Filter "osgPlugins*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $binDir -Recurse -Force }
+          # 复制 proj 数据
+          $projDir = "build/vcpkg_installed/${{ matrix.triplet }}/share/proj"
+          if (Test-Path $projDir) {
+            Copy-Item $projDir "$binDir/proj" -Recurse -Force
+          }
+          # GUI
+          if (Test-Path "osgb2tiles_gui.py") { Copy-Item "osgb2tiles_gui.py" $binDir -Force }
+          Compress-Archive -Path "install/*" -DestinationPath "${{ matrix.artifact }}${{ matrix.ext }}"
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # 复制共享库
+          VCPKG_LIB="build/vcpkg_installed/${{ matrix.triplet }}/lib"
+          if [ -d "$VCPKG_LIB" ]; then
+            mkdir -p install/lib
+            cp -f "$VCPKG_LIB"/*.so* install/lib/ 2>/dev/null || true
+            cp -f "$VCPKG_LIB"/*.dylib* install/lib/ 2>/dev/null || true
+          fi
+          # osgPlugins
+          OSG_TOOLS="build/vcpkg_installed/${{ matrix.triplet }}/tools/osg"
+          if [ -d "$OSG_TOOLS" ]; then
+            cp -r "$OSG_TOOLS"/osgPlugins* install/bin/ 2>/dev/null || true
+          fi
+          # proj 数据
+          PROJ_DATA="build/vcpkg_installed/${{ matrix.triplet }}/share/proj"
+          if [ -d "$PROJ_DATA" ]; then
+            cp -r "$PROJ_DATA" install/bin/proj
+          fi
+          tar czf "${{ matrix.artifact }}${{ matrix.ext }}" -C install .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}${{ matrix.ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
