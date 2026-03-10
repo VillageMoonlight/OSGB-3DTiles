@@ -32,13 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 创建 vcpkg 二进制缓存目录
-      - name: Create vcpkg cache dir
-        shell: bash
-        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-
-      # 缓存 vcpkg 二进制包（加速后续构建）
-      - name: Cache vcpkg binary packages
+      # 缓存 vcpkg 二进制包
+      - name: Cache vcpkg packages
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/vcpkg_cache
@@ -46,13 +41,23 @@ jobs:
           restore-keys: |
             vcpkg-${{ matrix.triplet }}-
 
-      # 安装 vcpkg
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: 'c82f31667c6e4bd24b01d9e5e42abbca19e01344'
+      - name: Create vcpkg cache dir
+        shell: bash
+        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
 
-      # Linux 系统依赖（编译器 + 图形库）
+      # 手动安装 vcpkg（避免 lukka/run-vcpkg 的 x-gha 兼容性问题）
+      - name: Install vcpkg
+        shell: bash
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$GITHUB_WORKSPACE/vcpkg" --depth 1
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            "$GITHUB_WORKSPACE/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          else
+            "$GITHUB_WORKSPACE/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg" >> "$GITHUB_ENV"
+
+      # Linux 系统依赖
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
