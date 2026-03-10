@@ -2,14 +2,16 @@
 #include "Logger.h"
 
 // tinygltf — 已在 GlbWriter.cpp 中 TINYGLTF_IMPLEMENTATION，此处只 include
+// 必须与 GlbWriter.cpp 相同的宏开关:
+// 禁止 tinygltf 注册 stb 默认回调（LoadImageData / WriteImageData）
+#define TINYGLTF_NO_STB_IMAGE
+#define TINYGLTF_NO_STB_IMAGE_WRITE
 #include <stb_image.h>
 #include <tiny_gltf.h>
-
 
 #include <meshoptimizer.h>
 #include <nlohmann/json.hpp>
 #include <webp/encode.h>
-
 
 #include <algorithm>
 #include <array>
