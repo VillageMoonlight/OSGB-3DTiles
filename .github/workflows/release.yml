@@ -4,9 +4,6 @@ on:
   push:
     tags: ['v*']
 
-env:
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-
 jobs:
   build:
     strategy:
@@ -29,28 +26,39 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.os }})
 
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg_cache
+
     steps:
       - uses: actions/checkout@v4
 
-      # vcpkg 二进制缓存加速（GitHub Actions Cache）
-      - name: Export GitHub Actions cache variables
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      # 创建 vcpkg 二进制缓存目录
+      - name: Create vcpkg cache dir
+        shell: bash
+        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
 
+      # 缓存 vcpkg 二进制包（加速后续构建）
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: vcpkg-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ matrix.triplet }}-
+
+      # 安装 vcpkg
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: '36fb23307e10cc6ffcec566c46c4bb3f567c82c6'
+          vcpkgGitCommitId: 'c82f31667c6e4bd24b01d9e5e42abbca19e01344'
 
-      # Linux 系统依赖
+      # Linux 系统依赖（编译器 + 图形库）
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            build-essential g++ \
             libgl1-mesa-dev libglu1-mesa-dev \
             libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
             libxt-dev libxmu-dev libxext-dev \
@@ -63,61 +71,55 @@ jobs:
           brew install nasm autoconf automake libtool pkg-config
 
       - name: CMake Configure
+        shell: bash
         run: |
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake \
+            "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-        shell: bash
 
       - name: CMake Build
-        run: cmake --build build --config Release --parallel
         shell: bash
+        run: cmake --build build --config Release --parallel
 
       - name: CMake Install
-        run: cmake --install build --prefix install --config Release
         shell: bash
+        run: cmake --install build --prefix install --config Release
 
-      # 打包
+      # 打包 Windows
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # 复制 DLL 和运行时依赖
           $binDir = "install/bin"
           $vcpkgBin = "build/vcpkg_installed/${{ matrix.triplet }}/bin"
           if (Test-Path $vcpkgBin) {
             Copy-Item "$vcpkgBin/*.dll" $binDir -Force -ErrorAction SilentlyContinue
           }
-          # 复制 osgPlugins 目录
           Get-ChildItem "build/vcpkg_installed/${{ matrix.triplet }}/tools/osg" -Directory -Filter "osgPlugins*" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName $binDir -Recurse -Force }
-          # 复制 proj 数据
           $projDir = "build/vcpkg_installed/${{ matrix.triplet }}/share/proj"
           if (Test-Path $projDir) {
             Copy-Item $projDir "$binDir/proj" -Recurse -Force
           }
-          # GUI
           if (Test-Path "osgb2tiles_gui.py") { Copy-Item "osgb2tiles_gui.py" $binDir -Force }
           Compress-Archive -Path "install/*" -DestinationPath "${{ matrix.artifact }}${{ matrix.ext }}"
 
+      # 打包 Linux/macOS
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          # 复制共享库
           VCPKG_LIB="build/vcpkg_installed/${{ matrix.triplet }}/lib"
           if [ -d "$VCPKG_LIB" ]; then
             mkdir -p install/lib
             cp -f "$VCPKG_LIB"/*.so* install/lib/ 2>/dev/null || true
             cp -f "$VCPKG_LIB"/*.dylib* install/lib/ 2>/dev/null || true
           fi
-          # osgPlugins
           OSG_TOOLS="build/vcpkg_installed/${{ matrix.triplet }}/tools/osg"
           if [ -d "$OSG_TOOLS" ]; then
             cp -r "$OSG_TOOLS"/osgPlugins* install/bin/ 2>/dev/null || true
           fi
-          # proj 数据
           PROJ_DATA="build/vcpkg_installed/${{ matrix.triplet }}/share/proj"
           if [ -d "$PROJ_DATA" ]; then
             cp -r "$PROJ_DATA" install/bin/proj
