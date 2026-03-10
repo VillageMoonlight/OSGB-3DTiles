@@ -87,6 +87,16 @@ test_*.obj
 *.tmp
 
 # =========================
+# Fix / patch / helper scripts (not core source)
+# =========================
+fix_*.py
+patch_*.py
+gui_patch.py
+make_icon.py
+verify_quadtree.py
+*.spec
+
+# =========================
 # OS generated
 # =========================
 Thumbs.db
