@@ -9,6 +9,29 @@
 #include <stb_image.h>
 #include <tiny_gltf.h>
 
+// ── 自定义 tinygltf 图像解码回调（使用 stb_image）──────────────────────
+static bool CustomLoadImageData(tinygltf::Image *image, int image_idx,
+                                std::string *err, std::string *warn,
+                                int req_width, int req_height,
+                                const unsigned char *bytes, int size,
+                                void *user_data) {
+  (void)image_idx; (void)warn; (void)req_width; (void)req_height; (void)user_data;
+  int w = 0, h = 0, ch = 0;
+  unsigned char *data = stbi_load_from_memory(bytes, size, &w, &h, &ch, 0);
+  if (!data) {
+    if (err) *err = "stb_image: failed to decode image";
+    return false;
+  }
+  image->width = w;
+  image->height = h;
+  image->component = ch;
+  image->bits = 8;
+  image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+  image->image.assign(data, data + w * h * ch);
+  stbi_image_free(data);
+  return true;
+}
+
 #include <meshoptimizer.h>
 #include <nlohmann/json.hpp>
 #include <webp/encode.h>
@@ -174,9 +197,10 @@ bool TopLevelMerger::extractFromTile(const std::string &tilePath,
     return false;
   }
 
-  // 使用 tinygltf 解析 GLB
+  // 使用 tinygltf 解析 GLB（注册自定义 stb_image 回调）
   tinygltf::Model model;
   tinygltf::TinyGLTF loader;
+  loader.SetImageLoader(CustomLoadImageData, nullptr);
   std::string err, warn;
 
   bool ok =
@@ -876,7 +900,7 @@ bool TopLevelMerger::updateRootTileset(const std::string &outputDir,
   newTs["root"] = root;
 
   // 写出
-  std::ofstream ofs(tilesetPath);
+  std::ofstream ofs(tilesetPath, std::ios::out | std::ios::trunc);
   if (!ofs) {
     LOG_ERROR("Cannot write updated tileset.json");
     return false;
