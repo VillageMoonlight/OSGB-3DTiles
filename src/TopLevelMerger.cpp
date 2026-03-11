@@ -9,32 +9,60 @@
 #include <stb_image.h>
 #include <tiny_gltf.h>
 
-// ── 自定义 tinygltf 图像解码回调（使用 stb_image）──────────────────────
+// WebP 编解码
+#include <webp/encode.h>
+#include <webp/decode.h>
+
+// ── 自定义 tinygltf 图像解码回调（stb_image + WebP 后备）──────────────
 static bool CustomLoadImageData(tinygltf::Image *image, int image_idx,
                                 std::string *err, std::string *warn,
                                 int req_width, int req_height,
                                 const unsigned char *bytes, int size,
                                 void *user_data) {
   (void)image_idx; (void)warn; (void)req_width; (void)req_height; (void)user_data;
+
+  // 尝试 1: stb_image（支持 JPEG/PNG/BMP/GIF 等）
   int w = 0, h = 0, ch = 0;
   unsigned char *data = stbi_load_from_memory(bytes, size, &w, &h, &ch, 0);
-  if (!data) {
-    if (err) *err = "stb_image: failed to decode image";
-    return false;
+  if (data) {
+    image->width = w;
+    image->height = h;
+    image->component = ch;
+    image->bits = 8;
+    image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+    image->image.assign(data, data + w * h * ch);
+    stbi_image_free(data);
+    return true;
   }
-  image->width = w;
-  image->height = h;
-  image->component = ch;
-  image->bits = 8;
-  image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
-  image->image.assign(data, data + w * h * ch);
-  stbi_image_free(data);
+
+  // 尝试 2: WebP 解码（libwebp）
+  if (size >= 4 && bytes[0] == 'R' && bytes[1] == 'I' &&
+      bytes[2] == 'F' && bytes[3] == 'F') {
+    // RIFF header → 可能是 WebP
+    uint8_t *webpData = WebPDecodeRGB(bytes, static_cast<size_t>(size), &w, &h);
+    if (webpData) {
+      image->width = w;
+      image->height = h;
+      image->component = 3;
+      image->bits = 8;
+      image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+      image->image.assign(webpData, webpData + w * h * 3);
+      WebPFree(webpData);
+      return true;
+    }
+  }
+
+  // 都失败：返回 true 但保持 image 为空（不阻断 GLB 解析，几何数据仍可提取）
+  image->width = 0;
+  image->height = 0;
+  image->component = 0;
+  image->image.clear();
+  if (warn) *warn = "Image decode skipped (unsupported format)";
   return true;
 }
 
 #include <meshoptimizer.h>
 #include <nlohmann/json.hpp>
-#include <webp/encode.h>
 
 #include <algorithm>
 #include <array>
