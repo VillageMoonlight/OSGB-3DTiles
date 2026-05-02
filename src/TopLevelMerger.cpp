@@ -13,6 +13,14 @@
 #include <webp/encode.h>
 #include <webp/decode.h>
 
+// KTX2 Basis Universal 解码（用于根节点合并时读取 KTX2 纹理）
+#ifdef HAVE_KTX
+#include <ktx.h>
+#ifndef VK_FORMAT_R8G8B8A8_UNORM
+#define VK_FORMAT_R8G8B8A8_UNORM 37u
+#endif
+#endif
+
 // ── 自定义 tinygltf 图像解码回调（stb_image + WebP 后备）──────────────
 static bool CustomLoadImageData(tinygltf::Image *image, int image_idx,
                                 std::string *err, std::string *warn,
@@ -52,6 +60,47 @@ static bool CustomLoadImageData(tinygltf::Image *image, int image_idx,
     }
   }
 
+  // 尝试 3: KTX2 Basis Universal 解码（libktx）
+#ifdef HAVE_KTX
+  // KTX2 magic: 0xAB 0x4B 0x54 0x58 0x20 0x32 0x30 0xBB 0x0D 0x0A 0x1A 0x0A
+  if (size >= 12 && (unsigned char)bytes[0] == 0xAB && bytes[1] == 'K' &&
+      bytes[2] == 'T' && bytes[3] == 'X') {
+    ktxTexture2 *ktx2 = nullptr;
+    KTX_error_code ec = ktxTexture2_CreateFromMemory(
+        bytes, static_cast<ktx_size_t>(size),
+        KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT, &ktx2);
+    if (ec == KTX_SUCCESS && ktx2) {
+      // 需要先 transcode（BasisU 压缩格式需要转码到 RGBA）
+      if (ktxTexture2_NeedsTranscoding(ktx2)) {
+        ec = ktxTexture2_TranscodeBasis(ktx2, KTX_TTF_RGBA32, 0);
+      }
+      if (ec == KTX_SUCCESS) {
+        w = static_cast<int>(ktx2->baseWidth);
+        h = static_cast<int>(ktx2->baseHeight);
+        ktx_size_t dataSize = ktxTexture_GetDataSize(ktxTexture(ktx2));
+        const ktx_uint8_t *pixels = ktxTexture_GetData(ktxTexture(ktx2));
+        if (pixels && dataSize >= static_cast<ktx_size_t>(w * h * 4)) {
+          // RGBA → RGB
+          image->width = w;
+          image->height = h;
+          image->component = 3;
+          image->bits = 8;
+          image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+          image->image.resize(static_cast<size_t>(w * h * 3));
+          for (int p = 0; p < w * h; ++p) {
+            image->image[p * 3 + 0] = pixels[p * 4 + 0];
+            image->image[p * 3 + 1] = pixels[p * 4 + 1];
+            image->image[p * 3 + 2] = pixels[p * 4 + 2];
+          }
+          ktxTexture_Destroy(ktxTexture(ktx2));
+          return true;
+        }
+      }
+      ktxTexture_Destroy(ktxTexture(ktx2));
+    }
+  }
+#endif // HAVE_KTX
+
   // 都失败：返回 true 但保持 image 为空（不阻断 GLB 解析，几何数据仍可提取）
   image->width = 0;
   image->height = 0;
@@ -63,6 +112,11 @@ static bool CustomLoadImageData(tinygltf::Image *image, int image_idx,
 
 #include <meshoptimizer.h>
 #include <nlohmann/json.hpp>
+
+#ifdef HAVE_DRACO
+#include <draco/compression/decode.h>
+#include <draco/mesh/mesh.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -239,14 +293,174 @@ bool TopLevelMerger::extractFromTile(const std::string &tilePath,
     LOG_WARN("Failed to parse glb in " + tilePath + ": " + err);
     return false;
   }
+  if (!warn.empty()) {
+    LOG_WARN("GLB warn in " + tilePath + ": " + warn);
+  }
+
+  // 诊断日志
+  LOG_INFO("GLB parsed: meshes=" + std::to_string(model.meshes.size()) +
+           " images=" + std::to_string(model.images.size()) +
+           " buffers=" + std::to_string(model.buffers.size()) +
+           " file=" + tilePath);
 
   // 提取第一个 mesh 的第一个 primitive
-  if (model.meshes.empty())
+  if (model.meshes.empty()) {
+    LOG_WARN("No meshes in GLB: " + tilePath);
     return false;
+  }
 
-  for (const auto &prim : model.meshes[0].primitives) {
-    if (prim.mode != TINYGLTF_MODE_TRIANGLES && prim.mode != -1)
+  LOG_INFO("Mesh[0] primitives=" + std::to_string(model.meshes[0].primitives.size()));
+  for (size_t pi = 0; pi < model.meshes[0].primitives.size(); ++pi) {
+    const auto &prim = model.meshes[0].primitives[pi];
+    std::string attrs;
+    for (const auto &a : prim.attributes) attrs += a.first + "(" + std::to_string(a.second) + ") ";
+    LOG_INFO("  prim[" + std::to_string(pi) + "] mode=" + std::to_string(prim.mode) +
+             " indices=" + std::to_string(prim.indices) + " attrs: " + attrs);
+    if (prim.mode != TINYGLTF_MODE_TRIANGLES && prim.mode != -1 && prim.mode != 0)
       continue;
+
+    // ── 检测 KHR_draco_mesh_compression ──
+    auto dracoExtIt = prim.extensions.find("KHR_draco_mesh_compression");
+    bool hasDraco = (dracoExtIt != prim.extensions.end());
+
+#ifdef HAVE_DRACO
+    if (hasDraco) {
+      try {
+      // Draco 解压路径
+      const auto &dracoExt = dracoExtIt->second;
+      if (!dracoExt.Has("bufferView")) { LOG_WARN("Draco ext missing bufferView"); continue; }
+      int dracoBvIdx = dracoExt.Get("bufferView").GetNumberAsInt();
+      if (dracoBvIdx < 0 || dracoBvIdx >= (int)model.bufferViews.size()) {
+        LOG_WARN("Draco bufferView out of range"); continue;
+      }
+      const auto &bv = model.bufferViews[dracoBvIdx];
+      const auto &bufRef = model.buffers[bv.buffer];
+      const uint8_t *dracoData = bufRef.data.data() + bv.byteOffset;
+      size_t dracoSize = bv.byteLength;
+
+      draco::Decoder decoder;
+      draco::DecoderBuffer decBuf;
+      decBuf.Init(reinterpret_cast<const char*>(dracoData), dracoSize);
+      auto statusOrMesh = decoder.DecodeMeshFromBuffer(&decBuf);
+      if (!statusOrMesh.ok()) {
+        LOG_WARN("Draco decode failed");
+        continue;
+      }
+      std::unique_ptr<draco::Mesh> dracoMesh = std::move(statusOrMesh).value();
+
+      // 从 Draco extension 获取 attribute IDs
+      int dracoPosId = -1, dracoUvId = -1;
+      if (dracoExt.Has("attributes")) {
+        const auto &attrs = dracoExt.Get("attributes");
+        if (attrs.Has("POSITION")) dracoPosId = attrs.Get("POSITION").GetNumberAsInt();
+        if (attrs.Has("TEXCOORD_0")) dracoUvId = attrs.Get("TEXCOORD_0").GetNumberAsInt();
+      }
+
+      // 提取顶点坐标
+      const draco::PointAttribute *posAttr = nullptr;
+      if (dracoPosId >= 0) posAttr = dracoMesh->attribute(dracoPosId);
+      else posAttr = dracoMesh->GetNamedAttribute(draco::GeometryAttribute::POSITION);
+
+      if (!posAttr || posAttr->num_components() < 3) {
+        LOG_WARN("Draco mesh has no POSITION attribute"); continue;
+      }
+
+      size_t baseVtx = out.vertices.size() / 3;
+      size_t numPts = static_cast<size_t>(dracoMesh->num_points());
+      out.vertices.reserve(out.vertices.size() + numPts * 3);
+      for (draco::PointIndex pi(0); pi < static_cast<uint32_t>(numPts); ++pi) {
+        float val[3] = {0, 0, 0};
+        posAttr->GetMappedValue(pi, val);
+        out.vertices.push_back(val[0]);
+        out.vertices.push_back(val[1]);
+        out.vertices.push_back(val[2]);
+      }
+
+      // 提取 UV
+      const draco::PointAttribute *uvAttr = nullptr;
+      if (dracoUvId >= 0) uvAttr = dracoMesh->attribute(dracoUvId);
+      else uvAttr = dracoMesh->GetNamedAttribute(draco::GeometryAttribute::TEX_COORD);
+      if (uvAttr && uvAttr->num_components() >= 2) {
+        out.uvs.reserve(out.uvs.size() + numPts * 2);
+        for (draco::PointIndex pi(0); pi < static_cast<uint32_t>(numPts); ++pi) {
+          float uv[2] = {0, 0};
+          uvAttr->GetMappedValue(pi, uv);
+          out.uvs.push_back(uv[0]);
+          out.uvs.push_back(uv[1]);
+        }
+      }
+
+      // 提取索引 — 不加 baseVtx（mergeBlocks 统一处理）
+      size_t numFaces = static_cast<size_t>(dracoMesh->num_faces());
+      out.indices.reserve(out.indices.size() + numFaces * 3);
+      for (draco::FaceIndex fi(0); fi < static_cast<uint32_t>(numFaces); ++fi) {
+        const auto &face = dracoMesh->face(fi);
+        out.indices.push_back(static_cast<uint32_t>(face[0].value()));
+        out.indices.push_back(static_cast<uint32_t>(face[1].value()));
+        out.indices.push_back(static_cast<uint32_t>(face[2].value()));
+      }
+
+      // 提取纹理（Draco 不压缩纹理，纹理仍在 buffer 中）
+      if (prim.material >= 0 && prim.material < (int)model.materials.size()) {
+        const auto &mat = model.materials[prim.material];
+        int texIdx2 = mat.pbrMetallicRoughness.baseColorTexture.index;
+        if (texIdx2 >= 0 && texIdx2 < (int)model.textures.size()) {
+          int imgIdx = model.textures[texIdx2].source;
+          if (imgIdx < 0) {
+            auto eit = model.textures[texIdx2].extensions.find("KHR_texture_basisu");
+            if (eit != model.textures[texIdx2].extensions.end() && eit->second.Has("source"))
+              imgIdx = eit->second.Get("source").GetNumberAsInt();
+          }
+          if (imgIdx >= 0 && imgIdx < (int)model.images.size()) {
+            const auto &img = model.images[imgIdx];
+            if (!img.image.empty() && img.width > 0 && img.height > 0) {
+              out.texWidth = img.width; out.texHeight = img.height;
+              if (img.component == 4) {
+                out.texRGB.resize(img.width * img.height * 3);
+                for (int p2 = 0; p2 < img.width * img.height; ++p2) {
+                  out.texRGB[p2*3]=img.image[p2*4]; out.texRGB[p2*3+1]=img.image[p2*4+1]; out.texRGB[p2*3+2]=img.image[p2*4+2];
+                }
+              } else if (img.component == 3) out.texRGB = img.image;
+            } else if (img.bufferView >= 0) {
+              const auto &ibv = model.bufferViews[img.bufferView];
+              const auto &ibuf = model.buffers[ibv.buffer];
+              const uint8_t *imgBytes = ibuf.data.data() + ibv.byteOffset;
+              int iw, ih, ic;
+              uint8_t *dec = stbi_load_from_memory(imgBytes, (int)ibv.byteLength, &iw, &ih, &ic, 3);
+              if (dec) {
+                out.texWidth=iw; out.texHeight=ih; out.texRGB.assign(dec, dec+iw*ih*3); stbi_image_free(dec);
+              } else {
+                uint8_t *wpd = WebPDecodeRGB(imgBytes, ibv.byteLength, &iw, &ih);
+                if (wpd) { out.texWidth=iw; out.texHeight=ih; out.texRGB.assign(wpd, wpd+iw*ih*3); WebPFree(wpd); }
+              }
+            }
+          }
+        }
+      }
+      LOG_INFO("  Draco decoded: vtx=" + std::to_string(numPts) +
+               " faces=" + std::to_string(numFaces) +
+               " texW=" + std::to_string(out.texWidth) +
+               " texH=" + std::to_string(out.texHeight) +
+               " texBytes=" + std::to_string(out.texRGB.size()) +
+               " uvs=" + std::to_string(out.uvs.size()));
+      break; // 只处理第一个 primitive
+      } catch (const std::exception &ex) {
+        LOG_WARN("Draco decode exception: " + std::string(ex.what()) + " file=" + tilePath);
+        continue;
+      } catch (...) {
+        LOG_WARN("Draco decode unknown exception, file=" + tilePath);
+        continue;
+      }
+    }
+#else
+    if (hasDraco) {
+      LOG_WARN("Draco compressed tile but HAVE_DRACO not compiled: " + tilePath);
+      continue;
+    }
+#endif
+
+    // ── 标准路径（非 Draco）──
+    if (hasDraco) continue; // Draco 路径已处理
 
     // 获取 buffer 数据的 lambda
     auto getAccessorData =
@@ -265,6 +479,34 @@ bool TopLevelMerger::extractFromTile(const std::string &tilePath,
     auto posIt = prim.attributes.find("POSITION");
     if (posIt == prim.attributes.end())
       continue;
+
+    // 诊断：输出 accessor 详情
+    {
+      int ai = posIt->second;
+      LOG_INFO("  POSITION accessor[" + std::to_string(ai) + "]:");
+      if (ai >= 0 && ai < (int)model.accessors.size()) {
+        const auto &a = model.accessors[ai];
+        LOG_INFO("    count=" + std::to_string(a.count) +
+                 " type=" + std::to_string(a.type) +
+                 " compType=" + std::to_string(a.componentType) +
+                 " bvIdx=" + std::to_string(a.bufferView) +
+                 " byteOff=" + std::to_string(a.byteOffset));
+        if (a.bufferView >= 0 && a.bufferView < (int)model.bufferViews.size()) {
+          const auto &bv = model.bufferViews[a.bufferView];
+          LOG_INFO("    bv: buffer=" + std::to_string(bv.buffer) +
+                   " offset=" + std::to_string(bv.byteOffset) +
+                   " len=" + std::to_string(bv.byteLength));
+          if (bv.buffer >= 0 && bv.buffer < (int)model.buffers.size()) {
+            LOG_INFO("    buf[" + std::to_string(bv.buffer) + "] dataSize=" +
+                     std::to_string(model.buffers[bv.buffer].data.size()));
+          }
+        }
+      } else {
+        LOG_WARN("    accessor index out of range! accessors.size=" +
+                 std::to_string(model.accessors.size()));
+      }
+    }
+
     auto [posPtr, posCount] = getAccessorData(posIt->second);
     if (!posPtr || posCount == 0)
       continue;
@@ -376,7 +618,14 @@ bool TopLevelMerger::extractFromTile(const std::string &tilePath,
     break; // 只处理第一个 primitive
   }
 
-  return !out.vertices.empty() && !out.indices.empty();
+  bool hasGeo = !out.vertices.empty() && !out.indices.empty();
+  if (!hasGeo) {
+    LOG_WARN("extractFromTile no geo: vtx=" + std::to_string(out.vertices.size()) +
+             " idx=" + std::to_string(out.indices.size()) +
+             " texW=" + std::to_string(out.texWidth) +
+             " file=" + tilePath);
+  }
+  return hasGeo;
 }
 
 void TopLevelMerger::buildAtlas(const std::vector<ExtractedBlock> &extracted,
@@ -384,7 +633,7 @@ void TopLevelMerger::buildAtlas(const std::vector<ExtractedBlock> &extracted,
                                 int &atlasH,
                                 std::vector<std::array<float, 4>> &uvRegions) {
   // 简单 strip 排列：所有纹理缩小到统一 lowRes，水平排列
-  const int lowRes = 128; // 每个 block 纹理缩到 128x128
+  const int lowRes = 256; // 每个 block 纹理缩到 256x256
 
   int count = 0;
   for (const auto &eb : extracted) {
@@ -534,11 +783,27 @@ void TopLevelMerger::simplifyMesh(MergedMesh &mesh, float targetRatio) {
 
   simplified.resize(resultCount);
 
-  // 重建顶点数组
+  // 构建 position+UV 交错缓冲区用于顶点去重
+  // 这样只有 position 和 UV 都完全相同的顶点才会被合并
+  // （避免 Draco 量化后位置相同但 UV 不同的顶点被错误合并）
+  bool hasUV = !mesh.uvs.empty() && mesh.uvs.size() == vtxCount * 2;
+  const size_t interleavedStride = hasUV ? sizeof(float) * 5 : sizeof(float) * 3;
+  std::vector<float> interleaved(vtxCount * (hasUV ? 5 : 3));
+  for (size_t i = 0; i < vtxCount; ++i) {
+    interleaved[i * (hasUV ? 5 : 3) + 0] = mesh.vertices[i * 3 + 0];
+    interleaved[i * (hasUV ? 5 : 3) + 1] = mesh.vertices[i * 3 + 1];
+    interleaved[i * (hasUV ? 5 : 3) + 2] = mesh.vertices[i * 3 + 2];
+    if (hasUV) {
+      interleaved[i * 5 + 3] = mesh.uvs[i * 2 + 0];
+      interleaved[i * 5 + 4] = mesh.uvs[i * 2 + 1];
+    }
+  }
+
+  // 重建顶点数组（基于 pos+UV 联合判定唯一性）
   std::vector<uint32_t> remap(vtxCount);
   size_t newVtxCount = meshopt_generateVertexRemap(
-      remap.data(), simplified.data(), resultCount, mesh.vertices.data(),
-      vtxCount, sizeof(float) * 3);
+      remap.data(), simplified.data(), resultCount, interleaved.data(),
+      vtxCount, interleavedStride);
 
   std::vector<float> newVerts(newVtxCount * 3);
   meshopt_remapVertexBuffer(newVerts.data(), mesh.vertices.data(), vtxCount,
@@ -552,7 +817,7 @@ void TopLevelMerger::simplifyMesh(MergedMesh &mesh, float targetRatio) {
   }
 
   std::vector<float> newUVs;
-  if (!mesh.uvs.empty() && mesh.uvs.size() == vtxCount * 2) {
+  if (hasUV) {
     newUVs.resize(newVtxCount * 2);
     meshopt_remapVertexBuffer(newUVs.data(), mesh.uvs.data(), vtxCount,
                               sizeof(float) * 2, remap.data());
@@ -588,7 +853,7 @@ bool TopLevelMerger::writeMergedTile(const MergedMesh &mesh,
     uint8_t *webpOut = nullptr;
     size_t webpSize =
         WebPEncodeRGB(mesh.atlasRGB.data(), mesh.atlasWidth, mesh.atlasHeight,
-                      mesh.atlasWidth * 3, 60, &webpOut); // 低质量，粗模够用
+                      mesh.atlasWidth * 3, 80, &webpOut); // 中等质量
     if (webpOut && webpSize > 0) {
       texEncoded.assign(webpOut, webpOut + webpSize);
       WebPFree(webpOut);
@@ -818,6 +1083,7 @@ json TopLevelMerger::buildTopTilesetNode(
   }
 
   jnode["geometricError"] = node.geometricError;
+  jnode["refine"] = "REPLACE";
 
   if (node.isLeaf()) {
     // 叶节点：直接引用原始 Block 的 tileset.json
@@ -846,6 +1112,7 @@ json TopLevelMerger::buildTopTilesetNode(
                                             0,  hy, 0,  0,  0, hz};
         }
         child["geometricError"] = blk.geometricError;
+        child["refine"] = "REPLACE";
         child["content"]["uri"] = "../" + blk.blockTilesetRelPath;
         children.push_back(child);
       }
@@ -916,10 +1183,12 @@ bool TopLevelMerger::updateRootTileset(const std::string &outputDir,
   }
 
   root["geometricError"] = existingTs.value("geometricError", 2000);
+  root["refine"] = "REPLACE";
 
   // 单子节点引用 top/tileset.json
   json topChild;
   topChild["geometricError"] = existingTs.value("geometricError", 2000);
+  topChild["refine"] = "REPLACE";
   if (root.contains("boundingVolume"))
     topChild["boundingVolume"] = root["boundingVolume"];
   topChild["content"]["uri"] = "./top/tileset.json";
@@ -927,13 +1196,28 @@ bool TopLevelMerger::updateRootTileset(const std::string &outputDir,
 
   newTs["root"] = root;
 
-  // 写出
-  std::ofstream ofs(tilesetPath, std::ios::out | std::ios::trunc);
-  if (!ofs) {
-    LOG_ERROR("Cannot write updated tileset.json");
-    return false;
+  // 写出 — 原子写入（先写临时文件再 rename，崩溃安全）
+  std::string content = newTs.dump(2);
+  std::string tmpPath = tilesetPath + ".tmp";
+  {
+    std::ofstream ofs(tmpPath);
+    if (!ofs) {
+      LOG_ERROR("Cannot write updated tileset.json");
+      return false;
+    }
+    ofs << content;
+    ofs.close();
   }
-  ofs << newTs.dump(2);
+  // 原子替换
+  try {
+    fs::remove(tilesetPath);
+    fs::rename(tmpPath, tilesetPath);
+  } catch (const std::exception &e) {
+    LOG_WARN("rename failed, falling back to copy: " + std::string(e.what()));
+    fs::copy_file(tmpPath, tilesetPath, fs::copy_options::overwrite_existing);
+    fs::remove(tmpPath);
+  }
+
   LOG_INFO("Updated root tileset.json with top-level merge reference");
   return true;
 }

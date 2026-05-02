@@ -2,7 +2,7 @@
 
 > A complete toolchain for converting oblique photogrammetry OSGB data to Cesium 3D Tiles format, including a multi-threaded CLI engine, a native OSGB 3D viewer, and a Python GUI frontend.
 
-**v0.0.1** · [中文文档](README.md) · [MIT License](LICENSE)
+**v0.2.0** · [中文文档](README.md) · [MIT License](LICENSE)
 
 <p align="center">
   <img src="osgb2tiles_gui_preview.png" alt="OSGB-3DTiles Logo" width="200">
@@ -39,6 +39,7 @@
 | **Draco compression** | Lossless geometry compression (~70% size reduction) |
 | **Bursa-Wolf 7-parameter** | Optional local CRS fine-tuning for survey control-point alignment |
 | **LOD tree generation** | Automatically generates multi-LOD tileset.json with decreasing geometricError |
+| **Root node merging** | Merges multiple Block coarse models into a single top-level LOD with Draco/KTX2 source decoding, texture Atlas reconstruction, and atomic write |
 | **Output formats** | B3DM (Cesium standard) or GLB (standalone files) |
 
 ### 🏔 OSGB 3D Viewer (`osgb_viewer.exe`)
@@ -116,8 +117,13 @@ OSGB Directory
    ├─ 6. GlbWriter        Assemble GLB/B3DM binary:
    │                       GLTF JSON + BIN + textures → single file
    │
-   └─ 7. TilesetBuilder   Generate root tileset.json:
-                            Compute bounding regions/boxes, geometricError hierarchy
+   ├─ 7. TilesetBuilder   Generate root tileset.json:
+   │                        Compute bounding regions/boxes, geometricError hierarchy
+   │
+   └─ 8. TopLevelMerger   Root node merging (optional):
+                             Extract lowest LOD from each Block → Draco/KTX2 decode →
+                             Texture Atlas stitching (256×256/block) → meshoptimizer simplify →
+                             Merge into single top-level coarse model → atomic tileset.json write
 ```
 
 ### Coordinate Transformation Strategy

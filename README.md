@@ -2,7 +2,7 @@
 
 > 将倾斜摄影 OSGB 数据转换为 Cesium 3D Tiles 格式的完整工具链，含多线程 CLI 转换引擎、原生 OSGB 三维浏览器和 Python GUI 前端。
 
-**v0.0.1** · [English](README_EN.md) · [MIT License](LICENSE)
+**v0.2.0** · [English](README_EN.md) · [MIT License](LICENSE)
 
 <p align="center">
   <img src="osgb2tiles_gui_preview.png" alt="OSGB-3DTiles Logo" width="200">
@@ -39,6 +39,7 @@
 | **Draco 压缩** | 几何数据 Draco 无损压缩（减小 B3DM 体积约 70%） |
 | **Bursa-Wolf 7参数** | 可选地方坐标系微调，精准对齐测量控制点 |
 | **LOD 树生成** | 自动生成多 LOD 级别 tileset.json（geometricError 逐级递减） |
+| **根节点合并** | 多 Block 粗模合并为单一顶层 LOD，支持 Draco/KTX2 源数据解码、纹理 Atlas 重构、原子写入 |
 | **输出格式** | B3DM（Cesium 标准）或 GLB（独立文件） |
 
 ### 🏔 OSGB 三维浏览器（`osgb_viewer.exe`）
@@ -116,8 +117,13 @@ OSGB 目录
    ├─ 6. GlbWriter        组装 GLB/B3DM 二进制：
    │                       GLTF JSON + BIN + 纹理 → 单文件
    │
-   └─ 7. TilesetBuilder   生成全局 tileset.json：
-                            计算包围盒（Region/Box）、geometricError
+   ├─ 7. TilesetBuilder   生成全局 tileset.json：
+   │                        计算包围盒（Region/Box）、geometricError
+   │
+   └─ 8. TopLevelMerger   根节点合并（可选）：
+                             提取各 Block 最低 LOD 瓦片 → Draco/KTX2 解码 →
+                             纹理 Atlas 拼接（256×256/块） → meshoptimizer 简化 →
+                             合并为单一顶层粗模 → 原子写入 tileset.json
 ```
 
 ### 坐标转换策略

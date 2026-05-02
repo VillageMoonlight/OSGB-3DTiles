@@ -1118,11 +1118,13 @@ int main(int argc, char *argv[]) {
   globalTs["root"] = globalRoot;
 
   std::string globalTilesetPath = cfg.outputPath + "/tileset.json";
-  std::ofstream gofs(globalTilesetPath);
-  if (gofs) {
-    gofs << globalTs.dump(2);
-    LOG_INFO("Wrote global tileset.json -> " + globalTilesetPath);
-  }
+  {
+    std::ofstream gofs(globalTilesetPath);
+    if (gofs) {
+      gofs << globalTs.dump(2);
+      LOG_INFO("Wrote global tileset.json -> " + globalTilesetPath);
+    }
+  } // gofs 关闭，释放文件句柄
 
   // ── 真正的根节点合并（可选） ───────────────────────────────────
   if (cfg.mergeRoot && okBlocks.size() > 1) {
